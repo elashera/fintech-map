@@ -82,3 +82,33 @@ export async function setUserProvince(
   }
   return { success: true };
 }
+
+/** Delete current user's profile row and sign out */
+export async function deleteMyAccount(): Promise<{
+  success: boolean;
+  error?: string;
+}> {
+  // Get current user
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return { success: false, error: "No hay sesión activa" };
+  }
+
+  // Delete profile row (cascade or RLS should handle related data)
+  const { error: profileError } = await supabase
+    .from("profiles")
+    .delete()
+    .eq("id", user.id);
+
+  if (profileError) {
+    return { success: false, error: profileError.message };
+  }
+
+  // Sign out to clear session
+  await supabase.auth.signOut();
+
+  return { success: true };
+}
