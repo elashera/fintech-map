@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState, useCallback } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "@/auth/supabaseClient";
@@ -149,10 +149,15 @@ function App() {
       </main>
 
       {/* Footer */}
-      <footer className='absolute bottom-1 left-2 map-overlay'>
+      <footer className='absolute bottom-1 left-2 map-overlay flex items-center gap-3'>
         <p className='text-[10px] text-muted-foreground/50'>
           Hecho por MichaelBed con ❤️
         </p>
+        <Link
+          to='/privacy'
+          className='text-[10px] text-muted-foreground/50 hover:text-muted-foreground transition-colors underline underline-offset-2'>
+          Política de Privacidad
+        </Link>
       </footer>
 
       {/* Confirmation dialog */}
