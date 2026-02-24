@@ -47,13 +47,14 @@ export function Header({ session }: HeaderProps) {
   };
 
   return (
-    <header className='flex items-center justify-between px-6 py-3 border-b border-border bg-card'>
+    <header className='relative z-[1000] flex items-center justify-between px-6 py-3 border-b border-border bg-card'>
       <Link to='/'>
         <h1 className='text-xl font-bold text-foreground tracking-tight'>FinXMap</h1>
       </Link>
 
       {session ? (
         <div className='flex items-center gap-3'>
+          {/* Avatar with dropdown for privacy + delete */}
           <div className='relative'>
             <button
               onClick={() => setMenuOpen((o) => !o)}
@@ -69,13 +70,11 @@ export function Header({ session }: HeaderProps) {
 
             {menuOpen && (
               <>
-                {/* Backdrop */}
                 <div
-                  className='fixed inset-0 z-40'
+                  className='fixed inset-0 z-[1001]'
                   onClick={() => setMenuOpen(false)}
                 />
-                {/* Menu */}
-                <div className='absolute right-0 top-full mt-2 z-50 w-52 rounded-lg border border-border bg-card shadow-xl py-1'>
+                <div className='absolute right-0 top-full mt-2 z-[1002] w-52 rounded-lg border border-border bg-card shadow-xl py-1'>
                   <Link
                     to='/privacy'
                     onClick={() => setMenuOpen(false)}
@@ -83,15 +82,6 @@ export function Header({ session }: HeaderProps) {
                     <Shield className='h-4 w-4 text-muted-foreground' />
                     Política de Privacidad
                   </Link>
-                  <button
-                    onClick={() => {
-                      setMenuOpen(false);
-                      handleSignOut();
-                    }}
-                    className='flex items-center gap-2 w-full px-3 py-2 text-sm text-foreground hover:bg-accent transition-colors'>
-                    <LogOut className='h-4 w-4 text-muted-foreground' />
-                    Cerrar sesión
-                  </button>
                   <div className='border-t border-border my-1' />
                   <button
                     onClick={() => {
@@ -106,6 +96,16 @@ export function Header({ session }: HeaderProps) {
               </>
             )}
           </div>
+
+          {/* Logout button — always visible */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant='ghost' size='icon' onClick={handleSignOut}>
+                <LogOut className='h-4 w-4' />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Cerrar sesión</TooltipContent>
+          </Tooltip>
         </div>
       ) : (
         <div className='flex items-center gap-3'>
