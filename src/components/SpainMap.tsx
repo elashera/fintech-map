@@ -49,12 +49,152 @@ const OCCUPIED_STYLE = {
   color: "#00ba7c",
 };
 
+type IslandAnchor = {
+  name: string;
+  lat: number;
+  lng: number;
+};
+
+type HoveredFeature = {
+  label: string;
+  province: string;
+};
+
+const ISLAND_SPLIT_ANCHORS: Record<string, IslandAnchor[]> = {
+  "Illes Balears": [
+    { name: "Mallorca", lat: 39.6, lng: 2.9 },
+    { name: "Menorca", lat: 39.95, lng: 4.1 },
+    { name: "Ibiza", lat: 38.98, lng: 1.43 },
+    { name: "Formentera", lat: 38.7, lng: 1.45 },
+  ],
+  "Las Palmas": [
+    { name: "Lanzarote", lat: 29.03, lng: -13.63 },
+    { name: "Fuerteventura", lat: 28.36, lng: -14.05 },
+    { name: "Gran Canaria", lat: 27.95, lng: -15.6 },
+  ],
+  "Santa Cruz De Tenerife": [
+    { name: "Tenerife", lat: 28.29, lng: -16.62 },
+    { name: "La Palma", lat: 28.69, lng: -17.86 },
+    { name: "La Gomera", lat: 28.11, lng: -17.23 },
+    { name: "El Hierro", lat: 27.73, lng: -18.03 },
+  ],
+};
+
 /** Compute the centroid of a GeoJSON feature's bounding box */
 function featureCentroid(feature: Feature<Geometry>): [number, number] {
   const layer = L.geoJSON(feature);
   const bounds = layer.getBounds();
   const center = bounds.getCenter();
   return [center.lat, center.lng];
+}
+
+/** Approximate relative area using bounding box span */
+function featureAreaScore(feature: Feature<Geometry>): number {
+  const layer = L.geoJSON(feature);
+  const bounds = layer.getBounds();
+  return (
+    Math.abs(bounds.getNorth() - bounds.getSouth()) *
+    Math.abs(bounds.getEast() - bounds.getWest())
+  );
+}
+
+function getRawProvinceName(feature: Feature<Geometry>): string {
+  return (
+    getStringProperty(feature, "name") ??
+    getStringProperty(feature, "NAME") ??
+    getStringProperty(feature, "provincia") ??
+    "Desconocida"
+  );
+}
+
+function getProvinceName(feature: Feature<Geometry>): string {
+  return getStringProperty(feature, "mapProvinceName") ?? getRawProvinceName(feature);
+}
+
+function getFeatureLabel(feature: Feature<Geometry>): string {
+  return getStringProperty(feature, "mapDisplayName") ?? getRawProvinceName(feature);
+}
+
+function getStringProperty(feature: Feature<Geometry>, key: string): string | null {
+  const value = feature.properties?.[key];
+  return typeof value === "string" ? value : null;
+}
+
+function nearestAnchor(
+  lat: number,
+  lng: number,
+  anchors: IslandAnchor[],
+): IslandAnchor {
+  let best = anchors[0];
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const anchor of anchors) {
+    const latDiff = anchor.lat - lat;
+    const lngDiff = anchor.lng - lng;
+    const distance = latDiff * latDiff + lngDiff * lngDiff;
+    if (distance < bestDistance) {
+      best = anchor;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+function polygonCentroid(polygon: number[][][]): [number, number] {
+  const ring = polygon[0] ?? [];
+  if (ring.length === 0) return [0, 0];
+
+  let lngSum = 0;
+  let latSum = 0;
+  for (const coord of ring) {
+    lngSum += coord[0] ?? 0;
+    latSum += coord[1] ?? 0;
+  }
+  return [latSum / ring.length, lngSum / ring.length];
+}
+
+function splitIslandFeature(feature: Feature<Geometry>): Feature<Geometry>[] {
+  const provinceName = getRawProvinceName(feature);
+  const anchors = ISLAND_SPLIT_ANCHORS[provinceName];
+  if (!anchors || feature.geometry.type !== "MultiPolygon") {
+    return [feature];
+  }
+
+  const groups = new Map<string, number[][][][]>();
+  anchors.forEach((anchor) => groups.set(anchor.name, []));
+
+  for (const polygon of feature.geometry.coordinates as number[][][][]) {
+    const [lat, lng] = polygonCentroid(polygon);
+    const anchor = nearestAnchor(lat, lng, anchors);
+    groups.get(anchor.name)?.push(polygon);
+  }
+
+  const splitFeatures: Feature<Geometry>[] = [];
+  for (const anchor of anchors) {
+    const coordinates = groups.get(anchor.name);
+    if (!coordinates || coordinates.length === 0) continue;
+
+    splitFeatures.push({
+      ...feature,
+      properties: {
+        ...(feature.properties ?? {}),
+        mapProvinceName: provinceName,
+        mapDisplayName: anchor.name,
+      },
+      geometry: {
+        type: "MultiPolygon",
+        coordinates,
+      },
+    });
+  }
+
+  return splitFeatures.length > 0 ? splitFeatures : [feature];
+}
+
+function splitArchipelagos(data: FeatureCollection): FeatureCollection {
+  return {
+    ...data,
+    features: data.features.flatMap(splitIslandFeature),
+  };
 }
 
 /** Escape HTML special chars to prevent XSS */
@@ -94,11 +234,11 @@ export function SpainMap({
   dialogOpen = false,
 }: SpainMapProps) {
   const [geoData, setGeoData] = useState<FeatureCollection | null>(null);
-  const [hovered, setHovered] = useState<string | null>(null);
+  const [hovered, setHovered] = useState<HoveredFeature | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Track the previously hovered layer to reset it if mouseout didn't fire
-  const prevHoveredRef = useRef<{ layer: Layer; name: string } | null>(null);
+  const prevHoveredRef = useRef<{ layer: Layer; province: string } | null>(null);
 
   /** Map province name → profiles in that province */
   const profilesByProvince = useMemo(() => {
@@ -122,12 +262,22 @@ export function SpainMap({
   /** Compute centroids from GeoJSON features for placing avatar markers */
   const provinceCentroids = useMemo(() => {
     if (!geoData) return new Map<string, [number, number]>();
-    const map = new Map<string, [number, number]>();
+    const map = new Map<string, { center: [number, number]; score: number }>();
     for (const feature of geoData.features) {
-      const name = getProvinceName(feature);
-      map.set(name, featureCentroid(feature));
+      const provinceName = getProvinceName(feature);
+      const center = featureCentroid(feature);
+      const score = featureAreaScore(feature);
+      const current = map.get(provinceName);
+      if (!current || score > current.score) {
+        map.set(provinceName, { center, score });
+      }
     }
-    return map;
+    return new Map(
+      Array.from(map.entries()).map(([provinceName, value]) => [
+        provinceName,
+        value.center,
+      ]),
+    );
   }, [geoData]);
 
   /** Avatar markers: for each occupied province, spread avatars around centroid */
@@ -170,30 +320,31 @@ export function SpainMap({
         if (!res.ok) throw new Error("Error cargando GeoJSON");
         return res.json();
       })
-      .then((data: FeatureCollection) => setGeoData(data))
+      .then((data: FeatureCollection) => setGeoData(splitArchipelagos(data)))
       .catch((err) => setError(err.message));
   }, []);
 
   const onEachFeature = useCallback(
     (feature: Feature<Geometry>, layer: Layer) => {
-      const name = getProvinceName(feature);
+      const provinceName = getProvinceName(feature);
+      const displayName = getFeatureLabel(feature);
 
       layer.on({
         mouseover: (e: LeafletMouseEvent) => {
           // Reset previous hover if mouseout was skipped
           const prev = prevHoveredRef.current;
           if (prev && prev.layer !== layer) {
-            const pName = prev.name;
-            if (pName !== selectedProvince) {
+            const prevProvince = prev.province;
+            if (prevProvince !== selectedProvince) {
               (prev.layer as L.Path).setStyle(
-                occupiedProvinces.has(pName) ? OCCUPIED_STYLE : DEFAULT_STYLE,
+                occupiedProvinces.has(prevProvince) ? OCCUPIED_STYLE : DEFAULT_STYLE,
               );
             }
           }
-          prevHoveredRef.current = { layer, name };
+          prevHoveredRef.current = { layer, province: provinceName };
 
-          setHovered(name);
-          if (name !== selectedProvince) {
+          setHovered({ label: displayName, province: provinceName });
+          if (provinceName !== selectedProvince) {
             e.target.setStyle(HOVER_STYLE);
           }
           e.target.bringToFront();
@@ -203,8 +354,8 @@ export function SpainMap({
             prevHoveredRef.current = null;
           }
           setHovered(null);
-          if (name !== selectedProvince) {
-            if (occupiedProvinces.has(name)) {
+          if (provinceName !== selectedProvince) {
+            if (occupiedProvinces.has(provinceName)) {
               e.target.setStyle(OCCUPIED_STYLE);
             } else {
               e.target.setStyle(DEFAULT_STYLE);
@@ -212,7 +363,7 @@ export function SpainMap({
           }
         },
         click: () => {
-          onProvinceSelect(name);
+          onProvinceSelect(provinceName);
         },
       });
     },
@@ -222,15 +373,17 @@ export function SpainMap({
   const styleFeature = useCallback(
     (feature: Feature<Geometry> | undefined) => {
       if (!feature) return DEFAULT_STYLE;
-      const name = getProvinceName(feature);
-      if (name === selectedProvince) return SELECTED_STYLE;
-      if (occupiedProvinces.has(name)) return OCCUPIED_STYLE;
+      const provinceName = getProvinceName(feature);
+      if (provinceName === selectedProvince) return SELECTED_STYLE;
+      if (occupiedProvinces.has(provinceName)) return OCCUPIED_STYLE;
       return DEFAULT_STYLE;
     },
     [selectedProvince, occupiedProvinces],
   );
 
-  const hoveredProfiles = hovered ? (profilesByProvince.get(hovered) ?? []) : [];
+  const hoveredProfiles = hovered
+    ? (profilesByProvince.get(hovered.province) ?? [])
+    : [];
 
   if (error) {
     return (
@@ -260,7 +413,7 @@ export function SpainMap({
       {hovered && (
         <div className='absolute top-3 right-3 flex flex-col items-end gap-2 map-overlay'>
           <Badge variant='secondary' className='text-sm shadow-lg'>
-            {hovered}
+            {hovered.label}
             {hoveredProfiles.length > 0 && (
               <span className='ml-1.5 text-muted-foreground'>
                 ({hoveredProfiles.length})
@@ -364,14 +517,5 @@ export function SpainMap({
         </MapContainer>
       </div>
     </div>
-  );
-}
-
-function getProvinceName(feature: Feature<Geometry>): string {
-  return (
-    feature.properties?.name ??
-    feature.properties?.NAME ??
-    feature.properties?.provincia ??
-    "Desconocida"
   );
 }
